@@ -46,9 +46,16 @@ def get_video_duration(video_path):
         return None
     try:
         result = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-            capture_output=True, text=True, creationflags=_SUBPROCESS_FLAGS,
+            [ffprobe,
+             "-v", "error",
+             "-analyzeduration", "100000000",
+             "-probesize", "100000000",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             video_path],
+            capture_output=True, text=True,
+            creationflags=_SUBPROCESS_FLAGS,
+            encoding="utf-8", errors="replace",
         )
         return float(result.stdout.strip())
     except (ValueError, FileNotFoundError, OSError):
@@ -73,6 +80,7 @@ class PhotoExtractorApp:
         self.sensitivity = tk.IntVar(value=5)
         self.status_text = tk.StringVar(value="Ready")
         self.is_running = False
+        self.cancelled = False
         self.process = None
 
         self._build_ui()
@@ -142,10 +150,8 @@ class PhotoExtractorApp:
 
     def _cancel(self):
         if self.process:
+            self.cancelled = True
             self.process.kill()
-            self.status_text.set("Cancelled.")
-            self.progress["value"] = 0
-            self._set_running(False)
 
     # ----------------------------------------------------------- extraction
     def _start_extraction(self):
@@ -173,6 +179,7 @@ class PhotoExtractorApp:
                 "The application may be corrupted — try re-downloading it.")
             return
 
+        self.cancelled = False
         self._set_running(True)
         self.progress["value"] = 0
         self.status_text.set("Starting extraction...")
@@ -185,6 +192,8 @@ class PhotoExtractorApp:
 
         cmd = [
             ffmpeg, "-y",
+            "-analyzeduration", "100000000",   # 100MB probe for VOB/MPEG
+            "-probesize", "100000000",
             "-i", video,
             "-vf", f"select='gt(scene,{threshold})'",
             "-vsync", "vfr",
@@ -194,28 +203,69 @@ class PhotoExtractorApp:
 
         try:
             self.process = subprocess.Popen(
-                cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE,
-                text=True, creationflags=_SUBPROCESS_FLAGS,
+                cmd,
+                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,     # FIX: discard stdout to prevent deadlock
+                creationflags=_SUBPROCESS_FLAGS,
             )
 
-            time_re = re.compile(r"time=(\d+):(\d+):(\d+)\.(\d+)")
-            for line in self.process.stderr:
-                m = time_re.search(line)
-                if m and duration and duration > 0:
-                    h, mi, s, cs = (int(x) for x in m.groups())
-                    cur = h * 3600 + mi * 60 + s + cs / 100.0
-                    pct = min(100, cur / duration * 100)
-                    self.root.after(0, self._update_progress, pct, cur, duration)
+            time_re = re.compile(rb"time=(\d+):(\d+):(\d+)\.(\d+)")
+            last_error_lines = []
+            buf = b""
+
+            # Read stderr in binary, split on both \r and \n for real-time progress
+            while True:
+                chunk = self.process.stderr.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                # Split on \r or \n to get individual status lines
+                while b"\r" in buf or b"\n" in buf:
+                    # Find the earliest delimiter
+                    r_pos = buf.find(b"\r")
+                    n_pos = buf.find(b"\n")
+                    if r_pos == -1:
+                        pos = n_pos
+                    elif n_pos == -1:
+                        pos = r_pos
+                    else:
+                        pos = min(r_pos, n_pos)
+
+                    line = buf[:pos]
+                    buf = buf[pos + 1:]
+
+                    # Track last meaningful lines for error reporting
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if decoded:
+                        last_error_lines.append(decoded)
+                        if len(last_error_lines) > 20:
+                            last_error_lines.pop(0)
+
+                    # Parse progress
+                    m = time_re.search(line)
+                    if m and duration and duration > 0:
+                        h, mi, s, cs = (int(x) for x in m.groups())
+                        cur = h * 3600 + mi * 60 + s + cs / 100.0
+                        pct = min(99, cur / duration * 100)
+                        self.root.after(0, self._update_progress, pct, cur, duration)
 
             self.process.wait()
 
-            if self.process and self.process.returncode == 0:
+            # If user cancelled, just clean up quietly
+            if self.cancelled:
+                self.root.after(0, self._cancelled)
+                return
+
+            if self.process.returncode == 0:
                 count = sum(1 for f in os.listdir(dest)
                             if f.startswith("frame_") and f.lower().endswith(".jpg"))
                 self.root.after(0, self._done, count)
-            elif self.process and self.process.returncode != 0:
-                self.root.after(0, self._error,
-                                "FFmpeg exited with an error.\nCheck that the video file is a supported format.")
+            else:
+                # Show the actual FFmpeg error to the user
+                error_detail = "\n".join(last_error_lines[-10:])
+                msg = f"FFmpeg failed (exit code {self.process.returncode}).\n\n{error_detail}"
+                self.root.after(0, self._error, msg)
+
         except FileNotFoundError:
             self.root.after(0, self._error, "FFmpeg executable not found.")
         except Exception as e:
@@ -232,6 +282,11 @@ class PhotoExtractorApp:
         self.status_text.set(f"Done! Extracted {count} image{'s' if count != 1 else ''}.")
         self._set_running(False)
         messagebox.showinfo("Complete", f"Extracted {count} image{'s' if count != 1 else ''}.")
+
+    def _cancelled(self):
+        self.progress["value"] = 0
+        self.status_text.set("Cancelled.")
+        self._set_running(False)
 
     def _error(self, msg):
         self.progress["value"] = 0
