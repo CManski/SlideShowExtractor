@@ -1,0 +1,48 @@
+name: Build PhotoExtractor.exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          Write-Host "Downloading FFmpeg..."
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Write-Host "Extracting..."
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_temp
+          # Find the bin folder inside the extracted archive
+          $binDir = Get-ChildItem -Path ffmpeg_temp -Recurse -Directory -Filter "bin" | Select-Object -First 1
+          New-Item -ItemType Directory -Path ffmpeg -Force
+          Copy-Item "$($binDir.FullName)\ffmpeg.exe" -Destination "ffmpeg\ffmpeg.exe"
+          Copy-Item "$($binDir.FullName)\ffprobe.exe" -Destination "ffmpeg\ffprobe.exe"
+          Write-Host "FFmpeg binaries ready:"
+          Get-ChildItem ffmpeg
+
+      - name: Build .exe with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name "PhotoExtractor" --add-data "ffmpeg\ffmpeg.exe;ffmpeg" --add-data "ffmpeg\ffprobe.exe;ffmpeg" photo_extractor.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoExtractor
+          path: dist/PhotoExtractor.exe

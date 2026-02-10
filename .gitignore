@@ -1,0 +1,8 @@
+dist/
+build/
+*.spec
+ffmpeg/
+ffmpeg_temp/
+ffmpeg_dl.zip
+__pycache__/
+*.pyc
