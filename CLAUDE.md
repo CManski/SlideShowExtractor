@@ -34,7 +34,8 @@ Requires `ffmpeg` and `ffprobe` either in a `ffmpeg/` sibling folder (with platf
 Single-file app (`photo_extractor.py`), one class:
 
 - **`PhotoExtractorApp`** — tkinter GUI with file/folder pickers, sensitivity slider (1–9), extract/cancel buttons, progress bar, status text.
-- **Extraction runs on a daemon thread** — spawns FFmpeg subprocess, parses `time=` from stderr for progress, posts updates to UI thread via `root.after()`.
+- **Source selection** — supports both single video files and folders (batch mode). Folder mode scans for supported video extensions and processes each file into its own subfolder.
+- **Extraction runs on a daemon thread** — spawns FFmpeg subprocess per video, parses `time=` from stderr for progress, posts updates to UI thread via `root.after()`.
 - **FFmpeg path resolution** (`_find_binary`) — checks `sys._MEIPASS` (PyInstaller bundle) first, then `ffmpeg/` folder next to the exe/script, then falls back to system PATH.
 - **`_SUBPROCESS_FLAGS`** — set to `CREATE_NO_WINDOW` on Windows only; 0 on macOS/Linux.
 - **`_BINARY_EXT`** — `.exe` on Windows, empty string on macOS/Linux. Used for platform-aware binary lookup.
@@ -49,10 +50,13 @@ Single-file app (`photo_extractor.py`), one class:
 
 ## Key Details
 
-- Sensitivity slider 1–9 maps to FFmpeg scene threshold 0.1–0.9 (`threshold = value / 10`).
-- FFmpeg command: `ffmpeg -y -analyzeduration 100000000 -probesize 100000000 -i [input] -vf "select='gt(scene,{threshold})'" -vsync vfr -q:v 2 [dest]/frame_%04d.jpg`
+- Sensitivity slider 1–9 uses an exponential scale: `threshold = 0.01 * (1.7 ** (value - 1))`, mapping to approximately 0.01–0.70. Low values catch dissolve/fade transitions; high values catch only hard cuts.
+- Scene detection uses a settle delay: on detecting a transition, the filter waits 1 second before capturing to grab the clean slide rather than a mid-transition frame. Implemented via FFmpeg's `select` filter with `st()`/`ld()` register expressions.
+- FFmpeg filter chain: `select='if(gt(scene,T)+not(n),st(0,t+1)*0,if(ld(0)*gte(t+1-ld(0),1),st(0,0)*0+1,0))',scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuvj420p`
+- `scale=trunc(iw/2)*2:trunc(ih/2)*2` ensures even dimensions for the MJPEG encoder.
+- `format=yuvj420p` converts to JPEG-compatible pixel format (fixes DVD/VOB sources).
 - `-q:v 2` produces high-quality JPEGs.
 - `-analyzeduration`/`-probesize` at 100MB ensures proper handling of VOB/MPEG/transport stream files.
-- Progress uses ffprobe for total duration, then parses FFmpeg's `time=HH:MM:SS.cs` output.
+- Progress uses ffprobe for total duration, then parses FFmpeg's `time=HH:MM:SS.cs` output. Batch mode shows overall progress across all files.
 - All subprocess calls use `_SUBPROCESS_FLAGS` to avoid console window flashes on Windows.
 - Supported formats: mp4, avi, mov, vob, mpg, mpeg, mkv, wmv, ts, m2ts, mts, flv, webm, m4v, 3gp, f4v.
