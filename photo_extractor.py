@@ -227,7 +227,8 @@ class PhotoExtractorApp:
         threading.Thread(target=self._run_extraction, args=(ffmpeg, videos, dest), daemon=True).start()
 
     def _run_extraction(self, ffmpeg, videos, dest):
-        threshold = round(self.sensitivity.get() / 10.0, 1)
+        # Exponential scale: 1→0.01 (catches dissolves) up to 9→0.70 (hard cuts only)
+        threshold = round(0.01 * (1.7 ** (self.sensitivity.get() - 1)), 3)
         total_files = len(videos)
         batch_mode = total_files > 1
         total_images = 0
