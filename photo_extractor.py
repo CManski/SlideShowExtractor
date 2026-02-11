@@ -252,7 +252,7 @@ class PhotoExtractorApp:
                 "-analyzeduration", "100000000",   # 100MB probe for VOB/MPEG
                 "-probesize", "100000000",
                 "-i", video,
-                "-vf", f"select='gt(scene,{threshold})',scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-vf", f"select='gt(scene,{threshold})',scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuvj420p",
                 "-vsync", "vfr",
                 "-q:v", "2",
                 output_pattern,
