@@ -253,7 +253,16 @@ class PhotoExtractorApp:
                 "-analyzeduration", "100000000",   # 100MB probe for VOB/MPEG
                 "-probesize", "100000000",
                 "-i", video,
-                "-vf", f"select='gt(scene,{threshold})',scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuvj420p",
+                # Scene-change select with 1-second settle delay:
+                # On scene change (or first frame), record the time but don't grab.
+                # 1 second later, grab the settled frame.
+                "-vf", (f"select='if(gt(scene,{threshold})+not(n),"
+                        f"st(0,t+1)*0,"
+                        f"if(ld(0)*gte(t+1-ld(0),1),"
+                        f"st(0,0)*0+1,"
+                        f"0))',"
+                        f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                        f"format=yuvj420p"),
                 "-vsync", "vfr",
                 "-q:v", "2",
                 output_pattern,
