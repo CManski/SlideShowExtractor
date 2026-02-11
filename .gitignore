@@ -4,5 +4,7 @@ build/
 ffmpeg/
 ffmpeg_temp/
 ffmpeg_dl.zip
+dmg_staging/
 __pycache__/
 *.pyc
+.DS_Store

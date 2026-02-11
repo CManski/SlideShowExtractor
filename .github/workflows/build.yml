@@ -1,4 +1,4 @@
-name: Build PhotoExtractor.exe
+name: Build Photo Extractor
 
 on:
   push:
@@ -6,7 +6,8 @@ on:
   workflow_dispatch:   # allows manual trigger from GitHub UI
 
 jobs:
-  build:
+  # ── Windows .exe ────────────────────────────────────────────────────
+  build-windows:
     runs-on: windows-latest
 
     steps:
@@ -29,7 +30,6 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
           Write-Host "Extracting..."
           Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_temp
-          # Find the bin folder inside the extracted archive
           $binDir = Get-ChildItem -Path ffmpeg_temp -Recurse -Directory -Filter "bin" | Select-Object -First 1
           New-Item -ItemType Directory -Path ffmpeg -Force
           Copy-Item "$($binDir.FullName)\ffmpeg.exe" -Destination "ffmpeg\ffmpeg.exe"
@@ -44,5 +44,82 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PhotoExtractor
+          name: PhotoExtractor-Windows
           path: dist/PhotoExtractor.exe
+
+  # ── macOS .dmg ──────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Install FFmpeg via Homebrew
+        run: brew install ffmpeg
+
+      - name: Prepare FFmpeg binaries with bundled dylibs
+        run: |
+          mkdir -p ffmpeg
+          cp "$(command -v ffmpeg)" ffmpeg/ffmpeg
+          cp "$(command -v ffprobe)" ffmpeg/ffprobe
+          chmod +x ffmpeg/ffmpeg ffmpeg/ffprobe
+
+          echo "Bundling dynamic libraries..."
+          bundle_dylibs() {
+              local binary="$1"
+              local dest_dir="$2"
+              while read -r lib; do
+                  case "$lib" in
+                      /usr/lib/*|/System/*|@*|"") continue ;;
+                  esac
+                  local lib_name
+                  lib_name=$(basename "$lib")
+                  if [ ! -f "$dest_dir/$lib_name" ]; then
+                      echo "  Bundling: $lib_name"
+                      cp "$lib" "$dest_dir/$lib_name"
+                      chmod +w "$dest_dir/$lib_name"
+                      install_name_tool -id "@loader_path/$lib_name" "$dest_dir/$lib_name" 2>/dev/null || true
+                      bundle_dylibs "$dest_dir/$lib_name" "$dest_dir"
+                  fi
+                  install_name_tool -change "$lib" "@loader_path/$lib_name" "$binary" 2>/dev/null || true
+              done < <(otool -L "$binary" 2>/dev/null | tail -n +2 | awk '{print $1}')
+          }
+
+          bundle_dylibs ffmpeg/ffmpeg ffmpeg/
+          bundle_dylibs ffmpeg/ffprobe ffmpeg/
+          echo "FFmpeg binaries ready:"
+          ls -la ffmpeg/
+
+      - name: Build .app with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onedir --windowed \
+            --name "PhotoExtractor" \
+            --osx-bundle-identifier "com.milehighsecure.photoextractor" \
+            --add-data "ffmpeg:ffmpeg" \
+            photo_extractor.py
+
+      - name: Create .dmg
+        run: |
+          mkdir -p dmg_staging
+          cp -R dist/PhotoExtractor.app dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+          hdiutil create -volname "Photo Extractor" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            dist/PhotoExtractor.dmg
+          rm -rf dmg_staging
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoExtractor-macOS
+          path: dist/PhotoExtractor.dmg

@@ -5,6 +5,7 @@ Photo Extractor - Extract scene-change images from slideshow videos using FFmpeg
 import os
 import sys
 import re
+import shutil
 import subprocess
 import threading
 import tkinter as tk
@@ -14,6 +15,9 @@ from tkinter import ttk, filedialog, messagebox
 _SUBPROCESS_FLAGS = 0
 if sys.platform == "win32":
     _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW
+
+# Platform-appropriate binary extension
+_BINARY_EXT = ".exe" if sys.platform == "win32" else ""
 
 
 def _resource_dir():
@@ -31,17 +35,18 @@ def _exe_dir():
 
 
 def _find_binary(name):
-    """Find a bundled binary, checking the PyInstaller bundle first, then next to the exe."""
+    """Find a bundled binary: PyInstaller bundle → next to exe → system PATH."""
     for base in (_resource_dir(), _exe_dir()):
         path = os.path.join(base, "ffmpeg", name)
         if os.path.isfile(path):
             return path
-    return None
+    # Fall back to system PATH (for development without bundled ffmpeg)
+    return shutil.which(name)
 
 
 def get_video_duration(video_path):
     """Get video duration in seconds using ffprobe."""
-    ffprobe = _find_binary("ffprobe.exe")
+    ffprobe = _find_binary(f"ffprobe{_BINARY_EXT}")
     if not ffprobe:
         return None
     try:
@@ -63,9 +68,15 @@ def get_video_duration(video_path):
 
 
 VIDEO_FILETYPES = [
-    ("Video files", "*.mp4 *.avi *.mov *.vob *.mpg *.mpeg *.mkv *.wmv"),
+    ("Video files", "*.mp4 *.avi *.mov *.vob *.mpg *.mpeg *.mkv *.wmv "
+                    "*.ts *.m2ts *.mts *.flv *.webm *.m4v *.3gp *.f4v"),
     ("All files", "*.*"),
 ]
+
+VIDEO_EXTENSIONS = {
+    '.mp4', '.avi', '.mov', '.vob', '.mpg', '.mpeg', '.mkv', '.wmv',
+    '.ts', '.m2ts', '.mts', '.flv', '.webm', '.m4v', '.3gp', '.f4v',
+}
 
 
 class PhotoExtractorApp:
@@ -89,12 +100,15 @@ class PhotoExtractorApp:
     def _build_ui(self):
         pad = {"padx": 12, "pady": 6}
 
-        # -- Video file --
-        f1 = ttk.LabelFrame(self.root, text="Source Video", padding=8)
+        # -- Source (file or folder) --
+        f1 = ttk.LabelFrame(self.root, text="Source", padding=8)
         f1.pack(fill="x", **pad)
         ttk.Entry(f1, textvariable=self.video_path, state="readonly").pack(
             side="left", fill="x", expand=True, padx=(0, 6))
-        ttk.Button(f1, text="Select Video File", command=self._select_video).pack(side="right")
+        ttk.Button(f1, text="Select Folder", command=self._select_source_folder).pack(
+            side="right")
+        ttk.Button(f1, text="Select File", command=self._select_video).pack(
+            side="right", padx=(0, 4))
 
         # -- Destination folder --
         f2 = ttk.LabelFrame(self.root, text="Destination Folder", padding=8)
@@ -137,6 +151,16 @@ class PhotoExtractorApp:
         path = filedialog.askopenfilename(title="Select Video File", filetypes=VIDEO_FILETYPES)
         if path:
             self.video_path.set(path)
+            self.status_text.set("Ready")
+
+    def _select_source_folder(self):
+        path = filedialog.askdirectory(title="Select Source Folder")
+        if path:
+            self.video_path.set(path)
+            count = sum(1 for f in os.listdir(path)
+                        if os.path.isfile(os.path.join(path, f))
+                        and os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS)
+            self.status_text.set(f"Found {count} video file{'s' if count != 1 else ''} in folder.")
 
     def _select_dest(self):
         path = filedialog.askdirectory(title="Select Destination Folder")
@@ -155,15 +179,32 @@ class PhotoExtractorApp:
 
     # ----------------------------------------------------------- extraction
     def _start_extraction(self):
-        video = self.video_path.get()
+        source = self.video_path.get()
         dest = self.dest_folder.get()
 
-        if not video:
-            messagebox.showwarning("Missing Input", "Please select a video file.")
+        if not source:
+            messagebox.showwarning("Missing Input", "Please select a video file or source folder.")
             return
-        if not os.path.isfile(video):
-            messagebox.showerror("File Not Found", f"Video file not found:\n{video}")
+        if not os.path.exists(source):
+            messagebox.showerror("Not Found", f"Source not found:\n{source}")
             return
+
+        if os.path.isfile(source):
+            videos = [source]
+        elif os.path.isdir(source):
+            videos = sorted(
+                os.path.join(source, f) for f in os.listdir(source)
+                if os.path.isfile(os.path.join(source, f))
+                and os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
+            )
+            if not videos:
+                messagebox.showwarning("No Videos Found",
+                                       "No supported video files found in the selected folder.")
+                return
+        else:
+            messagebox.showerror("Invalid Source", f"Source is not a file or folder:\n{source}")
+            return
+
         if not dest:
             messagebox.showwarning("Missing Input", "Please select a destination folder.")
             return
@@ -171,11 +212,11 @@ class PhotoExtractorApp:
             messagebox.showerror("Folder Not Found", f"Destination folder not found:\n{dest}")
             return
 
-        ffmpeg = _find_binary("ffmpeg.exe")
+        ffmpeg = _find_binary(f"ffmpeg{_BINARY_EXT}")
         if not ffmpeg:
             messagebox.showerror(
                 "FFmpeg Not Found",
-                "Could not find the bundled ffmpeg.exe.\n\n"
+                "Could not find the bundled FFmpeg.\n\n"
                 "The application may be corrupted — try re-downloading it.")
             return
 
@@ -183,105 +224,152 @@ class PhotoExtractorApp:
         self._set_running(True)
         self.progress["value"] = 0
         self.status_text.set("Starting extraction...")
-        threading.Thread(target=self._run_extraction, args=(ffmpeg, video, dest), daemon=True).start()
+        threading.Thread(target=self._run_extraction, args=(ffmpeg, videos, dest), daemon=True).start()
 
-    def _run_extraction(self, ffmpeg, video, dest):
+    def _run_extraction(self, ffmpeg, videos, dest):
         threshold = round(self.sensitivity.get() / 10.0, 1)
-        output_pattern = os.path.join(dest, "frame_%04d.jpg")
-        duration = get_video_duration(video)
+        total_files = len(videos)
+        batch_mode = total_files > 1
+        total_images = 0
 
-        cmd = [
-            ffmpeg, "-y",
-            "-analyzeduration", "100000000",   # 100MB probe for VOB/MPEG
-            "-probesize", "100000000",
-            "-i", video,
-            "-vf", f"select='gt(scene,{threshold})'",
-            "-vsync", "vfr",
-            "-q:v", "2",
-            output_pattern,
-        ]
-
-        try:
-            self.process = subprocess.Popen(
-                cmd,
-                stderr=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,     # FIX: discard stdout to prevent deadlock
-                creationflags=_SUBPROCESS_FLAGS,
-            )
-
-            time_re = re.compile(rb"time=(\d+):(\d+):(\d+)\.(\d+)")
-            last_error_lines = []
-            buf = b""
-
-            # Read stderr in binary, split on both \r and \n for real-time progress
-            while True:
-                chunk = self.process.stderr.read(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                # Split on \r or \n to get individual status lines
-                while b"\r" in buf or b"\n" in buf:
-                    # Find the earliest delimiter
-                    r_pos = buf.find(b"\r")
-                    n_pos = buf.find(b"\n")
-                    if r_pos == -1:
-                        pos = n_pos
-                    elif n_pos == -1:
-                        pos = r_pos
-                    else:
-                        pos = min(r_pos, n_pos)
-
-                    line = buf[:pos]
-                    buf = buf[pos + 1:]
-
-                    # Track last meaningful lines for error reporting
-                    decoded = line.decode("utf-8", errors="replace").strip()
-                    if decoded:
-                        last_error_lines.append(decoded)
-                        if len(last_error_lines) > 20:
-                            last_error_lines.pop(0)
-
-                    # Parse progress
-                    m = time_re.search(line)
-                    if m and duration and duration > 0:
-                        h, mi, s, cs = (int(x) for x in m.groups())
-                        cur = h * 3600 + mi * 60 + s + cs / 100.0
-                        pct = min(99, cur / duration * 100)
-                        self.root.after(0, self._update_progress, pct, cur, duration)
-
-            self.process.wait()
-
-            # If user cancelled, just clean up quietly
+        for file_idx, video in enumerate(videos):
             if self.cancelled:
-                self.root.after(0, self._cancelled)
-                return
+                break
 
-            if self.process.returncode == 0:
-                count = sum(1 for f in os.listdir(dest)
-                            if f.startswith("frame_") and f.lower().endswith(".jpg"))
-                self.root.after(0, self._done, count)
+            # Create per-video subfolder when processing multiple files
+            if batch_mode:
+                video_name = os.path.splitext(os.path.basename(video))[0]
+                file_dest = os.path.join(dest, video_name)
+                os.makedirs(file_dest, exist_ok=True)
             else:
-                # Show the actual FFmpeg error to the user
-                error_detail = "\n".join(last_error_lines[-10:])
-                msg = f"FFmpeg failed (exit code {self.process.returncode}).\n\n{error_detail}"
-                self.root.after(0, self._error, msg)
+                file_dest = dest
 
-        except FileNotFoundError:
-            self.root.after(0, self._error, "FFmpeg executable not found.")
-        except Exception as e:
-            self.root.after(0, self._error, str(e))
-        finally:
-            self.process = None
+            output_pattern = os.path.join(file_dest, "frame_%04d.jpg")
+            duration = get_video_duration(video)
 
-    def _update_progress(self, pct, cur, dur):
+            cmd = [
+                ffmpeg, "-y",
+                "-analyzeduration", "100000000",   # 100MB probe for VOB/MPEG
+                "-probesize", "100000000",
+                "-i", video,
+                "-vf", f"select='gt(scene,{threshold})'",
+                "-vsync", "vfr",
+                "-q:v", "2",
+                output_pattern,
+            ]
+
+            try:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,     # discard stdout to prevent deadlock
+                    creationflags=_SUBPROCESS_FLAGS,
+                )
+
+                time_re = re.compile(rb"time=(\d+):(\d+):(\d+)\.(\d+)")
+                last_error_lines = []
+                buf = b""
+
+                # Read stderr in binary, split on both \r and \n for real-time progress
+                while True:
+                    chunk = self.process.stderr.read(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    # Split on \r or \n to get individual status lines
+                    while b"\r" in buf or b"\n" in buf:
+                        # Find the earliest delimiter
+                        r_pos = buf.find(b"\r")
+                        n_pos = buf.find(b"\n")
+                        if r_pos == -1:
+                            pos = n_pos
+                        elif n_pos == -1:
+                            pos = r_pos
+                        else:
+                            pos = min(r_pos, n_pos)
+
+                        line = buf[:pos]
+                        buf = buf[pos + 1:]
+
+                        # Track last meaningful lines for error reporting
+                        decoded = line.decode("utf-8", errors="replace").strip()
+                        if decoded:
+                            last_error_lines.append(decoded)
+                            if len(last_error_lines) > 20:
+                                last_error_lines.pop(0)
+
+                        # Parse progress
+                        m = time_re.search(line)
+                        if m and duration and duration > 0:
+                            h, mi, s, cs = (int(x) for x in m.groups())
+                            cur = h * 3600 + mi * 60 + s + cs / 100.0
+                            file_pct = min(99, cur / duration * 100)
+                            overall_pct = (file_idx * 100 + file_pct) / total_files
+                            if batch_mode:
+                                status = (f"[{file_idx + 1}/{total_files}] "
+                                          f"{os.path.basename(video)} — {file_pct:.0f}%")
+                            else:
+                                status = (f"Extracting... {overall_pct:.0f}%  "
+                                          f"({cur:.0f}s / {duration:.0f}s)")
+                            self.root.after(0, self._update_progress,
+                                            overall_pct, status)
+
+                self.process.wait()
+
+                # If user cancelled, just clean up quietly
+                if self.cancelled:
+                    self.root.after(0, self._cancelled)
+                    return
+
+                if self.process.returncode == 0:
+                    count = sum(1 for f in os.listdir(file_dest)
+                                if f.startswith("frame_") and f.lower().endswith(".jpg"))
+                    total_images += count
+                else:
+                    # Show the actual FFmpeg error to the user
+                    error_detail = "\n".join(last_error_lines[-10:])
+                    filename = os.path.basename(video)
+                    msg = (f"FFmpeg failed on {filename} "
+                           f"(exit code {self.process.returncode}).\n\n"
+                           f"{error_detail}")
+                    self.root.after(0, self._error, msg)
+                    return
+
+            except FileNotFoundError:
+                self.root.after(0, self._error, "FFmpeg executable not found.")
+                return
+            except Exception as e:
+                self.root.after(0, self._error, str(e))
+                return
+            finally:
+                self.process = None
+
+        if not self.cancelled:
+            if batch_mode:
+                self.root.after(0, self._done_batch, total_images, total_files)
+            else:
+                self.root.after(0, self._done, total_images)
+
+    def _update_progress(self, pct, status):
         self.progress["value"] = pct
-        self.status_text.set(f"Extracting... {pct:.0f}%  ({cur:.0f}s / {dur:.0f}s)")
+        self.status_text.set(status)
 
     def _done(self, count):
         self.progress["value"] = 100
         self.status_text.set(f"Done! Extracted {count} image{'s' if count != 1 else ''}.")
         self._set_running(False)
         messagebox.showinfo("Complete", f"Extracted {count} image{'s' if count != 1 else ''}.")
+
+    def _done_batch(self, count, num_files):
+        self.progress["value"] = 100
+        self.status_text.set(
+            f"Done! Extracted {count} image{'s' if count != 1 else ''} "
+            f"from {num_files} video{'s' if num_files != 1 else ''}.")
+        self._set_running(False)
+        messagebox.showinfo(
+            "Complete",
+            f"Extracted {count} image{'s' if count != 1 else ''} "
+            f"from {num_files} video{'s' if num_files != 1 else ''}.")
 
     def _cancelled(self):
         self.progress["value"] = 0
