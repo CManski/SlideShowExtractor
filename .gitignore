@@ -1,5 +1,6 @@
 dist/
 build/
+PhotoExtractor/
 *.spec
 ffmpeg/
 ffmpeg_temp/
